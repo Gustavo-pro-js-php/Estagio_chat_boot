@@ -1,0 +1,339 @@
+const { Client, LocalAuth } = require('whatsapp-web.js');
+const qrcode = require('qrcode-terminal');
+const puppeteer = require('puppeteer');
+const fs = require('fs'); // Para manipular arquivos
+
+// Mapeamento de chat IDs para o estado da conversa
+const userStates = {};
+// Mapeamento de chat IDs para a INSTÂNCIA DA PÁGINA do Puppeteer
+const userPages = {};
+
+class WhatsAppClient {
+  constructor() {
+    this.client = new Client({ authStrategy: new LocalAuth() });
+    this.registerEvents();
+  }
+
+  registerEvents() {
+    this.client.on('qr', (qr) => {
+      qrcode.generate(qr, { small: true });
+      console.log('Escaneie o QR code com o WhatsApp!');
+    });
+
+    this.client.on('ready', () => {
+      console.log('🤖 Bot está pronto!');
+    });
+  }
+
+  onMessage(handler) {
+    this.client.on('message', handler);
+  }
+
+  sendMessage(to, message) {
+    return this.client.sendMessage(to, message);
+  }
+
+  initialize() {
+    this.client.initialize();
+  }
+}
+
+/**
+ * Função para preencher o formulário de Imóvel (IPTU)
+ * @param {string} codigoCadastro O código de cadastro do imóvel.
+ * @returns {Promise<puppeteer.Page>} Retorna a instância da página após o login.
+ */
+async function preencherImovel(codigoCadastro) {
+  const browser = await puppeteer.launch({ headless: false }); // Abrir navegador visível para debug
+  const page = await browser.newPage();
+
+  await page.goto('http://nfse.corumba.ms.gov.br:8080/servicosweb/home.jsf');
+
+  const iptuButtonSelector = '#formHome\\:j_idt1062\\:0\\:j_idt1064';
+  await page.waitForSelector(iptuButtonSelector);
+  await page.click(iptuButtonSelector);
+  console.log('Clicou no botão IPTU (IMOBILIÁRIO).');
+
+  const modalImovelSelector = '#compInformarImovel\\:j_idt80';
+  await page.waitForSelector(modalImovelSelector, { visible: true });
+  console.log('Modal "Informe os dados do imóvel" apareceu.');
+
+  const inputImovelSelector = '#compInformarImovel\\:formNumero\\:itIdentText';
+  await page.waitForSelector(inputImovelSelector, { visible: true });
+  console.log('Campo de Código de Cadastro visível.');
+
+  await page.type(inputImovelSelector, codigoCadastro);
+  console.log(`Preencheu o campo com: ${codigoCadastro}`);
+
+  const okButtonImovelSelector = '#compInformarImovel\\:formNumero\\:btnValidar';
+  await page.waitForSelector(okButtonImovelSelector, { visible: true });
+  await page.click(okButtonImovelSelector);
+  console.log('Clicou no botão OK do modal de Imóvel.');
+
+  await page.waitForNavigation({ waitUntil: 'networkidle0' });
+  console.log('Navegação após login de IPTU concluída.');
+
+  return page; // Retorna a página para interações futuras
+}
+
+/**
+ * Função para preencher o formulário de Contribuinte (CPF)
+ * @param {string} cpf O número do CPF.
+ * @returns {Promise<puppeteer.Page>} Retorna a instância da página após o login.
+ */
+async function preencherContribuinte(cpf) {
+  const browser = await puppeteer.launch({ headless: false }); // Abrir navegador visível para debug
+  const page = await browser.newPage();
+
+  await page.goto('http://nfse.corumba.ms.gov.br:8080/servicosweb/home.jsf');
+
+  const contribuinteButtonSelector = '#formHome\\:j_idt1062\\:3\\:j_idt1064';
+  await page.waitForSelector(contribuinteButtonSelector);
+  await page.click(contribuinteButtonSelector);
+  console.log('Clicou no botão Contribuinte\\TRS.');
+
+  const formContribuinteSelector = '#compInformarContribuinte\\:formNumero';
+  await page.waitForSelector(formContribuinteSelector, { visible: true });
+  console.log('Formulário de Contribuinte apareceu (dentro do modal).');
+
+  const radioPessoaFisicaSelector = '#compInformarContribuinte\\:formNumero\\:radioCadastroTipoPessoa\\:0';
+  const isChecked = await page.$eval(radioPessoaFisicaSelector, el => el.checked);
+  if (!isChecked) {
+      await page.click(radioPessoaFisicaSelector);
+      console.log('Clicou no rádio button "Pessoa Física".');
+      await page.waitForTimeout(500); // Pequeno atraso
+  } else {
+      console.log('Rádio button "Pessoa Física" já selecionado.');
+  }
+
+  const inputContribuinteSelector = '#compInformarContribuinte\\:formNumero\\:itIdent';
+  await page.waitForSelector(inputContribuinteSelector, { visible: true });
+  console.log('Campo de CPF/CNPJ visível.');
+
+  await page.type(inputContribuinteSelector, cpf);
+  console.log(`Preencheu o campo com: ${cpf}`);
+
+  const okButtonContribuinteSelector = '#compInformarContribuinte\\:formNumero\\:btnValidar';
+  await page.waitForSelector(okButtonContribuinteSelector, { visible: true });
+  await page.click(okButtonContribuinteSelector);
+  console.log('Clicou no botão OK do modal de Contribuinte.');
+
+  await page.waitForNavigation({ waitUntil: 'networkidle0' });
+  console.log('Navegação após login de Contribuinte concluída.');
+
+  return page; // Retorna a página para interações futuras
+}
+
+/**
+ * Função para interagir com as opções pós-login de contribuinte
+ * @param {string} option A opção escolhida pelo usuário (1 ou 2).
+ * @param {puppeteer.Page} page A instância da página do Puppeteer.
+ * @param {string} chatId O ID do chat para enviar o PDF.
+ */
+async function lidarOpcoesContribuinte(option, page, chatId) {
+    let messageToUser = '';
+    try {
+        if (option === '1') {
+            const debitosAbertoSelector = '#formContribuinte\\:repeat\\:0\\:clLinkImobiliario';
+            await page.waitForSelector(debitosAbertoSelector, { visible: true });
+            await page.click(debitosAbertoSelector);
+            console.log('Clicou em "DÉBITOS EM ABERTO".');
+            messageToUser = 'Clicou em "DÉBITOS EM ABERTO". Agora você pode interagir com essa tela no navegador.';
+            await page.waitForNavigation({ waitUntil: 'networkidle0' });
+            console.log('Navegação para Débitos em Aberto concluída.');
+        } else if (option === '2') {
+            const certidaoNegativaSelector = '#formContribuinte\\:repeat\\:1\\:clLinkImobiliario';
+            await page.waitForSelector(certidaoNegativaSelector, { visible: true });
+            await page.click(certidaoNegativaSelector);
+            console.log('Clicou em "CERTIDÃO NEGATIVA DE DÉBITOS".');
+
+            // Aguardar a navegação para a página de certidão (se houver)
+            await page.waitForNavigation({ waitUntil: 'networkidle0' });
+            console.log('Navegação para tela de Certidão Negativa de Débitos concluída.');
+
+            // NOVO: Processo para imprimir e enviar o PDF
+            const imprimirCertidaoButtonSelector = '#formCertidaoNegativaDebitos\\:tabView\\:j_idt396\\:j_idt443';
+            await page.waitForSelector(imprimirCertidaoButtonSelector, { visible: true });
+            console.log('Botão "Imprimir Certidão" visível.');
+
+            // Clicar no botão que abre o PDF em uma nova aba
+            // Puppeteer precisa de uma forma de esperar pela nova aba
+            const [pdfPage] = await Promise.all([
+                new Promise(resolve => page.browser().once('targetcreated', target => resolve(target.page()))),
+                page.click(imprimirCertidaoButtonSelector)
+            ]);
+
+            // Se o PDF for carregado diretamente na nova aba (target type 'page' ou 'other')
+            if (pdfPage) {
+                console.log('Nova aba para o PDF detectada.');
+                await pdfPage.waitForNavigation({ waitUntil: 'networkidle0' }); // Espera o conteúdo da nova aba carregar
+                console.log('Conteúdo da nova aba carregado.');
+
+                // Salvar o PDF
+                const pdfPath = `./certidao_${Date.now()}.pdf`;
+                await pdfPage.pdf({ path: pdfPath, format: 'A4' });
+                console.log(`PDF salvo em: ${pdfPath}`);
+
+                // Fechar a aba do PDF
+                await pdfPage.close();
+                console.log('Aba do PDF fechada.');
+
+                // Enviar o PDF pelo WhatsApp
+                try {
+                    const media = MessageMedia.fromFilePath(pdfPath);
+                    await bot.client.sendMessage(chatId, media, { caption: 'Sua certidão negativa de débitos.' });
+                    messageToUser = '✅ Sua certidão negativa de débitos foi enviada para você!';
+                } catch (sendError) {
+                    console.error('Erro ao enviar o PDF pelo WhatsApp:', sendError);
+                    messageToUser = '❌ Ocorreu um erro ao enviar a certidão pelo WhatsApp.';
+                } finally {
+                    fs.unlinkSync(pdfPath); // Deleta o arquivo PDF localmente após o envio
+                    console.log('Arquivo PDF local deletado.');
+                }
+            } else {
+                messageToUser = '❌ Não foi possível gerar ou encontrar a certidão PDF.';
+                console.error('Não foi possível obter a instância da nova página do PDF.');
+            }
+
+        } else {
+            messageToUser = 'Opção inválida. Por favor, digite "1" para "Débitos em Aberto" ou "2" para "Certidão Negativa de Débitos".';
+        }
+    } catch (error) {
+        console.error('Erro ao lidar com as opções de contribuinte:', error);
+        messageToUser = '❌ Ocorreu um erro ao tentar acessar a opção. Por favor, tente novamente.';
+    }
+    return messageToUser;
+}
+
+const bot = new WhatsAppClient();
+
+bot.onMessage(async message => {
+  const chatId = message.from;
+  const text = message.body.trim().toLowerCase();
+
+  // Importar MessageMedia apenas quando necessário para evitar ReferenceError se não for usado
+  // ou importar no topo se for usado sempre. Para este caso, melhor no topo.
+  const { MessageMedia } = require('whatsapp-web.js');
+
+  // Se o usuário não está em um estado de conversa, perguntar a opção
+  if (!userStates[chatId]) {
+    await bot.sendMessage(chatId,
+      'Olá! Por qual tipo de dado você gostaria de acessar?\n' +
+      '1. Código de Cadastro (IPTU)\n' +
+      '2. CPF (Contribuinte)'
+    );
+    userStates[chatId] = 'awaiting_option';
+    return;
+  }
+
+  // Se o usuário está esperando a opção de login (IPTU ou CPF)
+  if (userStates[chatId] === 'awaiting_option') {
+    if (text === '1' || text.includes('iptu') || text.includes('cadastro')) {
+      await bot.sendMessage(chatId, 'Certo! Por favor, informe o Código de Cadastro do imóvel.');
+      userStates[chatId] = 'awaiting_iptu_code';
+    } else if (text === '2' || text.includes('cpf') || text.includes('contribuinte')) {
+      await bot.sendMessage(chatId, 'Ok! Por favor, informe o número do seu CPF (somente números).');
+      userStates[chatId] = 'awaiting_cpf';
+    } else {
+      await bot.sendMessage(chatId, 'Opção inválida. Por favor, digite "1" para Código de Cadastro ou "2" para CPF.');
+    }
+    return;
+  }
+
+  // Se o usuário está esperando o código de cadastro
+  if (userStates[chatId] === 'awaiting_iptu_code') {
+    const codigoCadastro = message.body.trim();
+    await bot.sendMessage(chatId, `Recebi o código: ${codigoCadastro}. Tentando preencher o site para IPTU...`);
+    try {
+      const page = await preencherImovel(codigoCadastro);
+      userPages[chatId] = page;
+      userStates[chatId] = 'logged_in_iptu';
+      await bot.sendMessage(chatId, '✅ Código de cadastro preenchido no site com sucesso para IPTU! Você está logado no ambiente de IPTU.');
+    } catch (error) {
+      console.error('Erro ao preencher o site (IPTU):', error);
+      await bot.sendMessage(chatId, '❌ Erro ao preencher o código de cadastro no site para IPTU. Por favor, verifique o console do servidor para mais detalhes.');
+      delete userStates[chatId];
+      if (userPages[chatId]) {
+          await userPages[chatId].browser().close();
+          delete userPages[chatId];
+      }
+    }
+    return;
+  }
+
+  // Se o usuário está esperando o CPF
+  if (userStates[chatId] === 'awaiting_cpf') {
+    const cpf = message.body.trim();
+    if (!/^\d{11}$/.test(cpf)) {
+      await bot.sendMessage(chatId, 'CPF inválido. Por favor, digite apenas os 11 números do CPF.');
+      return;
+    }
+    await bot.sendMessage(chatId, `Recebi o CPF: ${cpf}. Tentando preencher o site para Contribuinte...`);
+    try {
+      const page = await preencherContribuinte(cpf);
+      userPages[chatId] = page;
+      userStates[chatId] = 'awaiting_contribuinte_option';
+      await bot.sendMessage(chatId,
+        '✅ CPF preenchido no site com sucesso para Contribuinte! Por favor, escolha uma opção:\n' +
+        '1. Débitos em Aberto\n' +
+        '2. Certidão Negativa de Débitos'
+      );
+    } catch (error) {
+      console.error('Erro ao preencher o site (CPF):', error);
+      await bot.sendMessage(chatId, '❌ Erro ao preencher o CPF no site para Contribuinte. Por favor, verifique o console do servidor para mais detalhes.');
+      delete userStates[chatId];
+      if (userPages[chatId]) {
+          await userPages[chatId].browser().close();
+          delete userPages[chatId];
+      }
+    }
+    return;
+  }
+
+  // Se o usuário está na tela de opções do contribuinte
+  if (userStates[chatId] === 'awaiting_contribuinte_option') {
+    const option = text;
+    if (userPages[chatId]) {
+        const page = userPages[chatId];
+        const responseMessage = await lidarOpcoesContribuinte(option, page, chatId); // Passa chatId para lidarOpcoesContribuinte
+        await bot.sendMessage(chatId, responseMessage);
+
+        // Se a opção 2 foi escolhida e o PDF foi enviado, você pode decidir fechar o navegador aqui
+        // ou deixar aberto para outras interações. Para o fluxo de "enviar PDF e terminar", fechar é lógico.
+        if (option === '2') {
+             if (userPages[chatId]) { // Garante que a página ainda existe antes de tentar fechar
+                await userPages[chatId].browser().close();
+                delete userPages[chatId];
+            }
+            delete userStates[chatId];
+        } else {
+             // Se não for a opção 2, o navegador permanece aberto e o estado é resetado
+             delete userStates[chatId];
+             // Poderíamos adicionar uma opção para o usuário digitar "sair" para fechar o navegador
+             // e limpar a sessão.
+        }
+
+    } else {
+        await bot.sendMessage(chatId, '❌ Parece que a sessão do navegador foi perdida. Por favor, comece novamente.');
+        delete userStates[chatId];
+    }
+    return;
+  }
+
+  // Em caso de mensagens inesperadas em outros estados
+  if (userStates[chatId]) {
+      await bot.sendMessage(chatId, 'Não entendi. Por favor, siga as instruções ou digite "reset" para recomeçar.');
+      if (text === 'reset') {
+          delete userStates[chatId];
+          if (userPages[chatId]) {
+              await userPages[chatId].browser().close();
+              delete userPages[chatId];
+          }
+          await bot.sendMessage(chatId, 'Sessão resetada. Por favor, comece novamente.');
+      }
+  } else {
+      await bot.sendMessage(chatId, 'Bem-vindo! Digite qualquer coisa para começar e escolher uma opção de login.');
+  }
+});
+
+bot.initialize();
